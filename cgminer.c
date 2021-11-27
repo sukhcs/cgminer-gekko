@@ -1195,15 +1195,6 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITHOUT_ARG("--balance",
 		     set_balance, &pool_strategy,
 		     "Change multipool strategy from failover to even share balance"),
-	OPT_WITH_ARG("--benchfile",
-			opt_set_charp, NULL, &opt_benchfile,
-			"Run cgminer in benchmark mode using a work file - produces no shares"),
-	OPT_WITHOUT_ARG("--benchfile-display",
-			opt_set_bool, &opt_benchfile_display,
-			"Display each benchfile nonce found"),
-	OPT_WITHOUT_ARG("--benchmark",
-			opt_set_bool, &opt_benchmark,
-			"Run cgminer in benchmark mode - produces no shares"),
 	OPT_WITHOUT_ARG("--block-check",
 			opt_set_bool, &opt_blockcheck,
 			"Run a block diff check of the binary then exit"),
@@ -2093,23 +2084,7 @@ static void gbt_merkle_bins(struct pool *pool, json_t *transaction_arr)
 			len = strlen(txn);
 			cg_memcpy(pool->txn_data + ofs, txn, len);
 			ofs += len;
-#if 0
-			// This logic no longer works post-segwit. The txids will always need to be sent,
-			// as the full txns will also contain witness data that must be omitted in these
-			// hashes.
-			if (!hash) {
-				unsigned char *txn_bin;
-				int txn_len;
 
-				txn_len = len / 2;
-				txn_bin = cgmalloc(txn_len);
-				hex2bin(txn_bin, txn, txn_len);
-				/* This is needed for pooled mining since only
-				 * transaction data and not hashes are sent */
-				gen_hash(txn_bin, hashbin + 32 + 32 * i, txn_len);
-				continue;
-			}
-#endif
 			if (!txid) {
 				applog(LOG_ERR, "missing txid in gbt_merkle_bins");
 				return;
@@ -3153,171 +3128,6 @@ static void calc_diff(struct work *work, double known)
 	}
 }
 
-static unsigned char bench_hidiff_bins[16][160];
-static unsigned char bench_lodiff_bins[16][160];
-static unsigned char bench_target[32];
-
-/* Iterate over the lo and hi diff benchmark work items such that we find one
- * diff 32+ share every 32 work items. */
-static void get_benchmark_work(struct work *work)
-{
-	work->work_difficulty = 32;
-	cg_memcpy(work->target, bench_target, 32);
-	work->drv_rolllimit = 0;
-	work->mandatory = true;
-	work->pool = pools[0];
-	cgtime(&work->tv_getwork);
-	copy_time(&work->tv_getwork_reply, &work->tv_getwork);
-	work->getwork_mode = GETWORK_MODE_BENCHMARK;
-}
-
-static void benchfile_dspwork(struct work *work, uint32_t nonce)
-{
-	char buf[1024];
-	uint32_t dn;
-	int i;
-
-	dn = 0;
-	for (i = 0; i < 4; i++) {
-		dn *= 0x100;
-		dn += nonce & 0xff;
-		nonce /= 0x100;
-	}
-
-	if ((sizeof(work->data) * 2 + 1) > sizeof(buf))
-		quithere(1, "BENCHFILE Invalid buf size");
-
-	__bin2hex(buf, work->data, sizeof(work->data));
-
-	applog(LOG_ERR, "BENCHFILE nonce %u=0x%08x for work=%s",
-			(unsigned int)dn, (unsigned int)dn, buf);
-
-}
-
-static bool benchfile_get_work(struct work *work)
-{
-	char buf[1024];
-	char item[1024];
-	bool got = false;
-
-	if (!benchfile_in) {
-		if (opt_benchfile)
-			benchfile_in = fopen(opt_benchfile, "r");
-		else
-			quit(1, "BENCHFILE Invalid benchfile NULL");
-
-		if (!benchfile_in)
-			quit(1, "BENCHFILE Failed to open benchfile '%s'", opt_benchfile);
-
-		benchfile_line = 0;
-
-		if (!fgets(buf, 1024, benchfile_in))
-			quit(1, "BENCHFILE Failed to read benchfile '%s'", opt_benchfile);
-
-		got = true;
-		benchfile_work = 0;
-	}
-
-	if (!got) {
-		if (!fgets(buf, 1024, benchfile_in)) {
-			if (benchfile_work == 0)
-				quit(1, "BENCHFILE No work in benchfile '%s'", opt_benchfile);
-			fclose(benchfile_in);
-			benchfile_in = NULL;
-			return benchfile_get_work(work);
-		}
-	}
-
-	do {
-		benchfile_line++;
-
-		// Empty lines and lines starting with '#' or '/' are ignored
-		if (*buf != '\0' && *buf != '#' && *buf != '/') {
-			char *commas[BENCHWORK_COUNT];
-			int i, j, len;
-			long nonce_time;
-
-			commas[0] = buf;
-			for (i = 1; i < BENCHWORK_COUNT; i++) {
-				commas[i] = strchr(commas[i-1], ',');
-				if (!commas[i]) {
-					quit(1, "BENCHFILE Invalid input file line %d"
-						" - field count is %d but should be %d",
-						benchfile_line, i, BENCHWORK_COUNT);
-				}
-				len = commas[i] - commas[i-1];
-				if (benchfile_data[i-1].length &&
-				    (len != benchfile_data[i-1].length)) {
-					quit(1, "BENCHFILE Invalid input file line %d "
-						"field %d (%s) length is %d but should be %d",
-						benchfile_line, i,
-						benchfile_data[i-1].name,
-						len, benchfile_data[i-1].length);
-				}
-
-				*(commas[i]++) = '\0';
-			}
-
-			// NonceTime may have LF's etc
-			len = strlen(commas[BENCHWORK_NONCETIME]);
-			if (len < benchfile_data[BENCHWORK_NONCETIME].length) {
-				quit(1, "BENCHFILE Invalid input file line %d field %d"
-					" (%s) length is %d but should be least %d",
-					benchfile_line, BENCHWORK_NONCETIME+1,
-					benchfile_data[BENCHWORK_NONCETIME].name, len,
-					benchfile_data[BENCHWORK_NONCETIME].length);
-			}
-
-			sprintf(item, "0000000%c", commas[BENCHWORK_VERSION][0]);
-
-			j = strlen(item);
-			for (i = benchfile_data[BENCHWORK_PREVHASH].length-8; i >= 0; i -= 8) {
-				sprintf(&(item[j]), "%.8s", &commas[BENCHWORK_PREVHASH][i]);
-				j += 8;
-			}
-
-			for (i = benchfile_data[BENCHWORK_MERKLEROOT].length-8; i >= 0; i -= 8) {
-				sprintf(&(item[j]), "%.8s", &commas[BENCHWORK_MERKLEROOT][i]);
-				j += 8;
-			}
-
-			nonce_time = atol(commas[BENCHWORK_NONCETIME]);
-
-			sprintf(&(item[j]), "%08lx", nonce_time);
-			j += 8;
-
-			strcpy(&(item[j]), commas[BENCHWORK_DIFFBITS]);
-			j += benchfile_data[BENCHWORK_DIFFBITS].length;
-
-			memset(work, 0, sizeof(*work));
-
-			hex2bin(work->data, item, j >> 1);
-
-			calc_midstate(work->pool, work);
-
-			benchfile_work++;
-
-			return true;
-		}
-	} while (fgets(buf, 1024, benchfile_in));
-
-	if (benchfile_work == 0)
-		quit(1, "BENCHFILE No work in benchfile '%s'", opt_benchfile);
-	fclose(benchfile_in);
-	benchfile_in = NULL;
-	return benchfile_get_work(work);
-}
-
-static void get_benchfile_work(struct work *work)
-{
-	benchfile_get_work(work);
-	work->mandatory = true;
-	work->pool = pools[0];
-	cgtime(&work->tv_getwork);
-	copy_time(&work->tv_getwork_reply, &work->tv_getwork);
-	work->getwork_mode = GETWORK_MODE_BENCHMARK;
-	calc_diff(work, 0);
-}
 
 static void kill_timeout(struct thr_info *thr)
 {
@@ -3844,9 +3654,6 @@ static bool stale_work(struct work *work, bool share)
 	time_t work_expiry;
 	struct pool *pool;
 
-	if (opt_benchmark || opt_benchfile)
-		return false;
-
 	if (work->work_block != work_block) {
 		applog(LOG_DEBUG, "Work stale due to block mismatch");
 		return true;
@@ -4337,13 +4144,7 @@ static bool test_work_current(struct work *work)
 				cg_memcpy(pool->prev_block, bedata, 32);
 			}
 		}
-#if 0
-		/* This isn't ideal, this pool is still on an old block but
-		 * accepting shares from it. To maintain fair work distribution
-		 * we work on it anyway. */
-		if (memcmp(bedata, current_block, 32))
-			applog(LOG_DEBUG, "Pool %d still on old block", pool->pool_no);
-#endif
+
 		if (work->longpoll) {
 			work->work_block = ++work_block;
 			if (shared_strategy() || work->pool == current_pool()) {
@@ -5765,20 +5566,6 @@ int share_work_tdiff(struct cgpu_info *cgpu)
 	return last_getwork - cgpu->last_device_valid_work;
 }
 
-static void set_benchmark_work(struct cgpu_info *cgpu, struct work *work)
-{
-	cgpu->lodiff += cgpu->direction;
-	if (cgpu->lodiff < 1)
-		cgpu->direction = 1;
-	if (cgpu->lodiff > 15) {
-		cgpu->direction = -1;
-		if (++cgpu->hidiff > 15)
-			cgpu->hidiff = 0;
-		cg_memcpy(work, &bench_hidiff_bins[cgpu->hidiff][0], 160);
-	} else
-		cg_memcpy(work, &bench_lodiff_bins[cgpu->lodiff][0], 160);
-}
-
 struct work *get_work(struct thr_info *thr, const int thr_id)
 {
 	struct cgpu_info *cgpu = thr->cgpu;
@@ -5806,8 +5593,6 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 	applog(LOG_DEBUG, "Got work from get queue to get work for thread %d", thr_id);
 
 	work->thr_id = thr_id;
-	if (opt_benchmark)
-		set_benchmark_work(cgpu, work);
 
 	thread_reportin(thr);
 	work->mined = true;
@@ -5823,22 +5608,6 @@ static void submit_work_async(struct work *work)
 	pthread_t submit_thread;
 
 	cgtime(&work->tv_work_found);
-	if (opt_benchmark) {
-		struct cgpu_info *cgpu = get_thr_cgpu(work->thr_id);
-
-		mutex_lock(&stats_lock);
-		cgpu->accepted++;
-		total_accepted++;
-		pool->accepted++;
-		cgpu->diff_accepted += work->work_difficulty;
-		total_diff_accepted += work->work_difficulty;
-		pool->diff_accepted += work->work_difficulty;
-		mutex_unlock(&stats_lock);
-
-		applog(LOG_NOTICE, "Accepted %s %d benchmark share nonce %08x",
-		       cgpu->drv->name, cgpu->device_id, *(uint32_t *)(work->data + 64 + 12));
-		return;
-	}
 
 	if (stale_work(work, true)) {
 		if (opt_submit_stale)
@@ -6011,9 +5780,6 @@ bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce)
 		return false;
 	}
 
-	if (opt_benchfile && opt_benchfile_display)
-		benchfile_dspwork(work, nonce);
-
 	return true;
 }
 
@@ -6034,9 +5800,6 @@ bool submit_noffset_nonce(struct thr_info *thr, struct work *work_in, uint32_t n
 		goto out;
 	}
 	update_work_stats(thr, work);
-
-	if (opt_benchfile && opt_benchfile_display)
-		benchfile_dspwork(work, nonce);
 
 	ret = true;
 	if (!fulltest(work->hash, work->target)) {
@@ -8102,31 +7865,6 @@ ASSERTbc(sizeof(test_work.hash) == (BC_MAX_BITS / HEX_BYTE));
 		return 0;
 	}
 
-	if (opt_benchmark || opt_benchfile) {
-		struct pool *pool;
-
-		pool = add_pool();
-		pool->rpc_url = cgmalloc(255);
-		if (opt_benchfile)
-			strcpy(pool->rpc_url, "Benchfile");
-		else
-			strcpy(pool->rpc_url, "Benchmark");
-		pool->rpc_user = pool->rpc_url;
-		pool->rpc_pass = pool->rpc_url;
-		pool->rpc_userpass = pool->rpc_url;
-		pool->sockaddr_url = pool->rpc_url;
-		strncpy(pool->diff, "?", sizeof(pool->diff)-1);
-		pool->diff[sizeof(pool->diff)-1] = '\0';
-		enable_pool(pool);
-		pool->idle = false;
-		successful_connect = true;
-
-		for (i = 0; i < 16; i++) {
-			hex2bin(&bench_hidiff_bins[i][0], &bench_hidiffs[i][0], 160);
-			hex2bin(&bench_lodiff_bins[i][0], &bench_lodiffs[i][0], 160);
-		}
-		set_target(bench_target, 32);
-	}
 #endif
 
 	applog(LOG_WARNING, "Started %s", packagename);
@@ -8215,9 +7953,6 @@ ASSERTbc(sizeof(test_work.hash) == (BC_MAX_BITS / HEX_BYTE));
 		if (opt_stderr_cmd)
 			fork_monitor();
 	#endif // defined(unix)
-
-	if (opt_benchmark || opt_benchfile)
-		goto begin_bench;
 
 	for (i = 0; i < total_pools; i++) {
 		struct pool *pool  = pools[i];
@@ -8452,17 +8187,6 @@ begin_bench:
 			continue;
 		}
 #endif
-		if (opt_benchfile) {
-			get_benchfile_work(work);
-			applog(LOG_DEBUG, "Generated benchfile work");
-			stage_work(work);
-			continue;
-		} else if (opt_benchmark) {
-			get_benchmark_work(work);
-			applog(LOG_DEBUG, "Generated benchmark work");
-			stage_work(work);
-			continue;
-		}
 	}
 
 	return 0;
