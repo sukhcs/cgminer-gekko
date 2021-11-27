@@ -32,12 +32,6 @@ static void my_log_curses(int prio, const char *datetime, const char *str, bool 
 		mutex_trylock(&console_lock);
 		mutex_unlock(&console_lock);
 	}
-#ifdef HAVE_CURSES
-	extern bool use_curses;
-	if (use_curses && log_curses_only(prio, datetime, str))
-		;
-	else
-#endif
 	{
 		mutex_lock(&console_lock);
 		printf("%s%s%s", datetime, str, "                    \n");

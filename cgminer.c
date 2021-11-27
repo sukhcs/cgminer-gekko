@@ -19,10 +19,6 @@
 #endif
 #endif
 
-#ifdef HAVE_CURSES
-#include <curses.h>
-#endif
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,11 +152,7 @@ static int most_devices;
 struct cgpu_info **devices;
 int mining_threads;
 int num_processors;
-#ifdef HAVE_CURSES
-bool use_curses = true;
-#else
 bool use_curses;
-#endif
 bool opt_widescreen;
 static bool alt_status;
 static bool switch_status;
@@ -246,9 +238,6 @@ struct thr_info **mining_thr;
 static int gwsched_thr_id;
 static int watchpool_thr_id;
 static int watchdog_thr_id;
-#ifdef HAVE_CURSES
-static int input_thr_id;
-#endif
 int gpur_thr_id;
 static int api_thr_id;
 #ifdef USE_USBUTILS
@@ -314,11 +303,7 @@ enum pool_strategy pool_strategy = POOL_FAILOVER;
 int opt_rotate_period;
 static int total_urls, total_users, total_passes, total_userpasses, total_extranonce;
 
-static
-#ifndef HAVE_CURSES
-const
-#endif
-bool curses_active;
+static const bool curses_active;
 
 /* Protected by ch_lock */
 char current_hash[68];
@@ -1304,20 +1289,10 @@ static struct opt_table opt_config_table[] = {
 		     opt_set_charp, NULL, &opt_btc_sig,
 		     "Set signature to add to coinbase when solo mining (optional)"),
 #endif
-#ifdef HAVE_CURSES
-	OPT_WITHOUT_ARG("--compact",
-			opt_set_bool, &opt_compact,
-			"Use compact display without per device statistics"),
-#endif
 
 	OPT_WITHOUT_ARG("--debug|-D",
 		     enable_debug, &opt_debug,
 		     "Enable debug output"),
-#ifdef HAVE_CURSES
-	OPT_WITHOUT_ARG("--decode",
-			opt_set_bool, &opt_decode,
-			"Decode 2nd pool stratum coinbase transactions (1st must be bitcoind) and exit"),
-#endif
 	OPT_WITHOUT_ARG("--disable-rejecting",
 			opt_set_bool, &opt_disable_pool,
 			"Automatically disable pools that continually reject shares"),
@@ -1431,13 +1406,7 @@ static struct opt_table opt_config_table[] = {
 			"Use system log for output messages (default: standard error)"),
 #endif
 	OPT_WITHOUT_ARG("--text-only|-T",
-			opt_set_invbool, &use_curses,
-#ifdef HAVE_CURSES
-			"Disable ncurses formatted screen output"
-#else
-			opt_hidden
-#endif
-	),
+			opt_set_invbool, &use_curses, opt_hidden),
 	OPT_WITH_ARG("--url|-o",
 		     set_url, NULL, &opt_set_null,
 		     "URL for bitcoin JSON-RPC server"),
@@ -2503,7 +2472,7 @@ static int __total_staged(void)
 {
 	return HASH_COUNT(staged_work);
 }
-#if defined(HAVE_LIBCURL) || defined(HAVE_CURSES)
+#if defined(HAVE_LIBCURL)
 static int total_staged(void)
 {
 	int ret;
@@ -2516,40 +2485,10 @@ static int total_staged(void)
 }
 #endif
 
-#ifdef HAVE_CURSES
-WINDOW *mainwin, *statuswin, *logwin;
-#endif
 double total_secs = 1.0;
 static char statusline[256];
 /* logstart is where the log window should start */
 static int devcursor, logstart, logcursor;
-#ifdef HAVE_CURSES
-/* statusy is where the status window goes up to in cases where it won't fit at startup */
-static int statusy;
-#endif
-
-#ifdef HAVE_CURSES
-static inline void unlock_curses(void)
-{
-	mutex_unlock(&console_lock);
-}
-
-static inline void lock_curses(void)
-{
-	mutex_lock(&console_lock);
-}
-
-static bool curses_active_locked(void)
-{
-	bool ret;
-
-	lock_curses();
-	ret = curses_active;
-	if (!ret)
-		unlock_curses();
-	return ret;
-}
-#endif
 
 /* Convert a uint64_t value into a truncated string for displaying with its
  * associated suitable for Mega, Giga etc. Buf array needs to be long enough */
@@ -2674,325 +2613,6 @@ static bool shared_strategy(void)
 	return (pool_strategy == POOL_LOADBALANCE || pool_strategy == POOL_BALANCE);
 }
 
-#ifdef HAVE_CURSES
-#define CURBUFSIZ 256
-#define cg_mvwprintw(win, y, x, fmt, ...) do { \
-	char tmp42[CURBUFSIZ]; \
-	snprintf(tmp42, sizeof(tmp42), fmt, ##__VA_ARGS__); \
-	mvwprintw(win, y, x, "%s", tmp42); \
-} while (0)
-#define cg_wprintw(win, fmt, ...) do { \
-	char tmp42[CURBUFSIZ]; \
-	snprintf(tmp42, sizeof(tmp42), fmt, ##__VA_ARGS__); \
-	wprintw(win, "%s", tmp42); \
-} while (0)
-
-/* Must be called with curses mutex lock held and curses_active */
-static void curses_print_status(void)
-{
-	struct pool *pool = current_pool();
-	int linewidth = opt_widescreen ? 100 : 80;
-
-	wattron(statuswin, A_BOLD);
-	cg_mvwprintw(statuswin, 0, 0, " " PACKAGE " version " VERSION " - Started: %s", datestamp);
-	wattroff(statuswin, A_BOLD);
-	mvwhline(statuswin, 1, 0, '-', linewidth);
-	cg_mvwprintw(statuswin, 2, 0, " %s", statusline);
-	wclrtoeol(statuswin);
-	if (opt_widescreen) {
-		cg_mvwprintw(statuswin, 3, 0, " A:%.0f  R:%.0f  HW:%d  WU:%.1f/m |"
-			     " ST: %d  SS: %"PRId64"  NB: %d  LW: %d  GF: %d  RF: %d",
-			     total_diff_accepted, total_diff_rejected, hw_errors,
-			     total_diff1 / total_secs * 60,
-			     total_staged(), total_stale, new_blocks, local_work, total_go, total_ro);
-	} else if (alt_status) {
-		cg_mvwprintw(statuswin, 3, 0, " ST: %d  SS: %"PRId64"  NB: %d  LW: %d  GF: %d  RF: %d",
-			     total_staged(), total_stale, new_blocks, local_work, total_go, total_ro);
-	} else {
-		cg_mvwprintw(statuswin, 3, 0, " A:%.0f  R:%.0f  HW:%d  WU:%.1f/m",
-			     total_diff_accepted, total_diff_rejected, hw_errors,
-			     total_diff1 / total_secs * 60);
-	}
-	wclrtoeol(statuswin);
-	if (shared_strategy() && total_pools > 1) {
-		cg_mvwprintw(statuswin, 4, 0, " Connected to multiple pools with%s block change notify",
-			have_longpoll ? "": "out");
-	} else if (pool->has_stratum) {
-		cg_mvwprintw(statuswin, 4, 0, " Connected to %s diff %s with stratum as user %s",
-			pool->sockaddr_url, pool->diff, pool->rpc_user);
-	} else {
-		cg_mvwprintw(statuswin, 4, 0, " Connected to %s diff %s with%s %s as user %s",
-			pool->sockaddr_url, pool->diff, have_longpoll ? "": "out",
-			pool->has_gbt ? "GBT" : "LP", pool->rpc_user);
-	}
-	wclrtoeol(statuswin);
-	cg_mvwprintw(statuswin, 5, 0, " Block: %s...  Diff:%s  Started: %s  Best share: %s   ",
-		     prev_block, block_diff, blocktime, best_share);
-	mvwhline(statuswin, 6, 0, '-', linewidth);
-	mvwhline(statuswin, statusy - 1, 0, '-', linewidth);
-#ifdef USE_USBUTILS
-	cg_mvwprintw(statuswin, devcursor - 1, 1, "[U]SB management [P]ool management [S]ettings [D]isplay options [Q]uit");
-#else
-	cg_mvwprintw(statuswin, devcursor - 1, 1, "[P]ool management [S]ettings [D]isplay options [Q]uit");
-#endif
-}
-
-static void adj_width(int var, int *length)
-{
-	if ((int)(log10(var) + 1) > *length)
-		(*length)++;
-}
-
-static void adj_fwidth(float var, int *length)
-{
-	if ((int)(log10(var) + 1) > *length)
-		(*length)++;
-}
-
-#define STATBEFORELEN 23
-const char blanks[] = "                                        ";
-
-static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
-{
-	static int devno_width = 1, dawidth = 1, drwidth = 1, hwwidth = 1, wuwidth = 1;
-	char logline[256], unique_id[12];
-	struct timeval now;
-	double dev_runtime, wu;
-	unsigned int devstatlen;
-
-	if (opt_compact)
-		return;
-
-	if (devcursor + count > LINES - 2)
-		return;
-
-	if (count >= most_devices)
-		return;
-
-	if (cgpu->dev_start_tv.tv_sec == 0)
-		dev_runtime = total_secs;
-	else {
-		cgtime(&now);
-		dev_runtime = tdiff(&now, &(cgpu->dev_start_tv));
-	}
-
-	if (dev_runtime < 1.0)
-		dev_runtime = 1.0;
-
-	cgpu->utility = cgpu->accepted / dev_runtime * 60;
-	wu = cgpu->diff1 / dev_runtime * 60;
-
-	wmove(statuswin,devcursor + count, 0);
-	adj_width(devno, &devno_width);
-	if (cgpu->unique_id) {
-		unique_id[8] = '\0';
-		cg_memcpy(unique_id, blanks, 8);
-		strncpy(unique_id, cgpu->unique_id, 8);
-	} else
-		sprintf(unique_id, "%-8d", cgpu->device_id);
-	cg_wprintw(statuswin, " %*d: %s %-8s: ", devno_width, devno, cgpu->drv->name,
-		   unique_id);
-	logline[0] = '\0';
-	cgpu->drv->get_statline_before(logline, sizeof(logline), cgpu);
-	devstatlen = strlen(logline);
-	if (devstatlen < STATBEFORELEN)
-		strncat(logline, blanks, STATBEFORELEN - devstatlen);
-	cg_wprintw(statuswin, "%s | ", logline);
-
-
-#ifdef USE_USBUTILS
-	if (cgpu->usbinfo.nodev)
-		cg_wprintw(statuswin, "ZOMBIE");
-	else
-#endif
-	if (cgpu->status == LIFE_DEAD)
-		cg_wprintw(statuswin, "DEAD  ");
-	else if (cgpu->status == LIFE_SICK)
-		cg_wprintw(statuswin, "SICK  ");
-	else if (cgpu->deven == DEV_DISABLED)
-		cg_wprintw(statuswin, "OFF   ");
-	else if (cgpu->deven == DEV_RECOVER)
-		cg_wprintw(statuswin, "REST  ");
-	else if (opt_widescreen) {
-		char displayed_hashes[16], displayed_rolling[16];
-		uint64_t d64;
-
-		d64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
-		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
-		d64 = (double)cgpu->rolling * 1000000ull;
-		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
-		adj_width(wu, &wuwidth);
-		adj_fwidth(cgpu->diff_accepted, &dawidth);
-		adj_fwidth(cgpu->diff_rejected, &drwidth);
-		adj_width(cgpu->hw_errors, &hwwidth);
-		cg_wprintw(statuswin, "%6s / %6sh/s WU:%*.1f/m "
-				"A:%*.0f R:%*.0f HW:%*d",
-				displayed_rolling,
-				displayed_hashes, wuwidth + 2, wu,
-				dawidth, cgpu->diff_accepted,
-				drwidth, cgpu->diff_rejected,
-				hwwidth, cgpu->hw_errors);
-	} else if (!alt_status) {
-		char displayed_hashes[16], displayed_rolling[16];
-		uint64_t d64;
-
-		d64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
-		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
-		d64 = (double)cgpu->rolling * 1000000ull;
-		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
-		adj_width(wu, &wuwidth);
-		cg_wprintw(statuswin, "%6s / %6sh/s WU:%*.1f/m", displayed_rolling,
-			   displayed_hashes, wuwidth + 2, wu);
-	} else {
-		adj_fwidth(cgpu->diff_accepted, &dawidth);
-		adj_fwidth(cgpu->diff_rejected, &drwidth);
-		adj_width(cgpu->hw_errors, &hwwidth);
-		cg_wprintw(statuswin, "A:%*.0f R:%*.0f HW:%*d",
-				dawidth, cgpu->diff_accepted,
-				drwidth, cgpu->diff_rejected,
-				hwwidth, cgpu->hw_errors);
-	}
-
-	logline[0] = '\0';
-	cgpu->drv->get_statline(logline, sizeof(logline), cgpu);
-	cg_wprintw(statuswin, "%s", logline);
-
-	wclrtoeol(statuswin);
-}
-#endif
-
-#ifdef HAVE_CURSES
-/* Check for window resize. Called with curses mutex locked */
-static inline void change_logwinsize(void)
-{
-	int x, y, logx, logy;
-
-	getmaxyx(mainwin, y, x);
-	if (x < 80 || y < 25)
-		return;
-
-	if (y > statusy + 2 && statusy < logstart) {
-		if (y - 2 < logstart)
-			statusy = y - 2;
-		else
-			statusy = logstart;
-		logcursor = statusy + 1;
-		mvwin(logwin, logcursor, 0);
-		wresize(statuswin, statusy, x);
-	}
-
-	y -= logcursor;
-	getmaxyx(logwin, logy, logx);
-	/* Detect screen size change */
-	if (x != logx || y != logy)
-		wresize(logwin, y, x);
-}
-
-static void check_winsizes(void)
-{
-	if (!use_curses)
-		return;
-	if (curses_active_locked()) {
-		int y, x;
-
-		erase();
-		x = getmaxx(statuswin);
-		if (logstart > LINES - 2)
-			statusy = LINES - 2;
-		else
-			statusy = logstart;
-		logcursor = statusy;
-		wresize(statuswin, statusy, x);
-		getmaxyx(mainwin, y, x);
-		y -= logcursor;
-		wresize(logwin, y, x);
-		mvwin(logwin, logcursor, 0);
-		unlock_curses();
-	}
-}
-
-static void disable_curses_windows(void);
-static void enable_curses_windows(void);
-
-static void switch_logsize(bool __maybe_unused newdevs)
-{
-	if (curses_active_locked()) {
-#ifdef WIN32
-		if (newdevs)
-			disable_curses_windows();
-#endif
-		if (opt_compact) {
-			logstart = devcursor + 1;
-			logcursor = logstart + 1;
-		} else {
-			logstart = devcursor + most_devices + 1;
-			logcursor = logstart + 1;
-		}
-#ifdef WIN32
-		if (newdevs)
-			enable_curses_windows();
-#endif
-		unlock_curses();
-		check_winsizes();
-	}
-}
-
-/* For mandatory printing when mutex is already locked */
-void _wlog(const char *str)
-{
-	wprintw(logwin, "%s", str);
-}
-
-/* Mandatory printing */
-void _wlogprint(const char *str)
-{
-	if (curses_active_locked()) {
-		wprintw(logwin, "%s", str);
-		unlock_curses();
-	}
-}
-#endif
-
-#ifdef HAVE_CURSES
-bool log_curses_only(int prio, const char *datetime, const char *str)
-{
-	bool high_prio;
-
-	high_prio = (prio == LOG_WARNING || prio == LOG_ERR);
-
-	if (curses_active_locked()) {
-		if (!opt_loginput || high_prio) {
-			wprintw(logwin, "%s%s\n", datetime, str);
-			if (high_prio) {
-				touchwin(logwin);
-				wrefresh(logwin);
-			}
-		}
-		unlock_curses();
-		return true;
-	}
-	return false;
-}
-
-void clear_logwin(void)
-{
-	if (curses_active_locked()) {
-		erase();
-		wclear(logwin);
-		unlock_curses();
-	}
-}
-
-void logwin_update(void)
-{
-	if (curses_active_locked()) {
-		touchwin(logwin);
-		wrefresh(logwin);
-		unlock_curses();
-	}
-}
-#endif
-
 static void enable_pool(struct pool *pool)
 {
 	if (pool->enabled != POOL_ENABLED) {
@@ -3000,15 +2620,6 @@ static void enable_pool(struct pool *pool)
 		pool->enabled = POOL_ENABLED;
 	}
 }
-
-#ifdef HAVE_CURSES
-static void disable_pool(struct pool *pool)
-{
-	if (pool->enabled == POOL_ENABLED)
-		enabled_pools--;
-	pool->enabled = POOL_DISABLED;
-}
-#endif
 
 static void reject_pool(struct pool *pool)
 {
@@ -3707,56 +3318,6 @@ static void get_benchfile_work(struct work *work)
 	work->getwork_mode = GETWORK_MODE_BENCHMARK;
 	calc_diff(work, 0);
 }
-
-#ifdef HAVE_CURSES
-static void disable_curses_windows(void)
-{
-	leaveok(logwin, false);
-	leaveok(statuswin, false);
-	leaveok(mainwin, false);
-	nocbreak();
-	echo();
-	delwin(logwin);
-	delwin(statuswin);
-}
-
-/* Force locking of curses console_lock on shutdown since a dead thread might
- * have grabbed the lock. */
-static bool curses_active_forcelocked(void)
-{
-	bool ret;
-
-	mutex_trylock(&console_lock);
-	ret = curses_active;
-	if (!ret)
-		unlock_curses();
-	return ret;
-}
-
-static void disable_curses(void)
-{
-	if (curses_active_forcelocked()) {
-		use_curses = false;
-		curses_active = false;
-		disable_curses_windows();
-		delwin(mainwin);
-		endwin();
-#ifdef WIN32
-		// Move the cursor to after curses output.
-		HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
-		CONSOLE_SCREEN_BUFFER_INFO csbi;
-		COORD coord;
-
-		if (GetConsoleScreenBufferInfo(hout, &csbi)) {
-			coord.X = 0;
-			coord.Y = csbi.dwSize.Y - 1;
-			SetConsoleCursorPosition(hout, coord);
-		}
-#endif
-		unlock_curses();
-	}
-}
-#endif
 
 static void kill_timeout(struct thr_info *thr)
 {
@@ -4840,51 +4401,6 @@ static void _stage_work(struct work *work)
 	hash_push(work);
 }
 
-#ifdef HAVE_CURSES
-int curses_int(const char *query)
-{
-	int ret;
-	char *cvar;
-
-	cvar = curses_input(query);
-	ret = atoi(cvar);
-	free(cvar);
-	return ret;
-}
-#endif
-
-#ifdef HAVE_CURSES
-static bool input_pool(bool live);
-#endif
-
-#ifdef HAVE_CURSES
-static void display_pool_summary(struct pool *pool)
-{
-	if (curses_active_locked()) {
-		wlog("Pool: %s\n", pool->rpc_url);
-		if (pool->solved)
-			wlog("SOLVED %d BLOCK%s!\n", pool->solved, pool->solved > 1 ? "S" : "");
-		if (!pool->has_stratum)
-			wlog("%s own long-poll support\n", pool->hdr_path ? "Has" : "Does not have");
-		wlog(" Work templates received: %d\n", pool->getwork_requested);
-		wlog(" Share submissions: %"PRId64"\n", pool->accepted + pool->rejected);
-		wlog(" Accepted shares: %"PRId64"\n", pool->accepted);
-		wlog(" Rejected shares: %"PRId64"\n", pool->rejected);
-		wlog(" Accepted difficulty shares: %1.f\n", pool->diff_accepted);
-		wlog(" Rejected difficulty shares: %1.f\n", pool->diff_rejected);
-		if (pool->accepted || pool->rejected)
-			wlog(" Reject ratio: %.1f%%\n", (double)(pool->rejected * 100) / (double)(pool->accepted + pool->rejected));
-
-		wlog(" Items worked on: %d\n", pool->works);
-		wlog(" Discarded work due to new blocks: %d\n", pool->discarded_work);
-		wlog(" Stale submissions discarded due to new blocks: %d\n", pool->stale_shares);
-		wlog(" Unable to get work from server occasions: %d\n", pool->getfail_occasions);
-		wlog(" Submitting work remotely delay occasions: %d\n\n", pool->remotefail_occasions);
-		unlock_curses();
-	}
-}
-#endif
-
 /* We can't remove the memory used for this struct pool because there may
  * still be work referencing it. We just remove it from the pools list */
 void remove_pool(struct pool *pool)
@@ -5181,270 +4697,6 @@ static void __maybe_unused set_lowprio(void)
 #endif
 }
 
-#ifdef HAVE_CURSES
-static void display_pools(void)
-{
-	struct pool *pool;
-	int selected, i;
-	char input;
-
-	opt_loginput = true;
-	immedok(logwin, true);
-	clear_logwin();
-updated:
-	for (i = 0; i < total_pools; i++) {
-		pool = pools[i];
-
-		if (pool == current_pool())
-			wattron(logwin, A_BOLD);
-		if (pool->enabled != POOL_ENABLED)
-			wattron(logwin, A_DIM);
-		wlogprint("%d: ", pool->pool_no);
-		switch (pool->enabled) {
-			case POOL_ENABLED:
-				wlogprint("Enabled ");
-				break;
-			case POOL_DISABLED:
-				wlogprint("Disabled ");
-				break;
-			case POOL_REJECTING:
-				wlogprint("Rejecting ");
-				break;
-		}
-		wlogprint("%s Quota %d Prio %d: %s  User:%s\n",
-			pool->idle? "Dead" : "Alive",
-			pool->quota,
-			pool->prio,
-			pool->rpc_url, pool->rpc_user);
-		wattroff(logwin, A_BOLD | A_DIM);
-	}
-retry:
-	wlogprint("\nCurrent pool management strategy: %s\n",
-		strategies[pool_strategy].s);
-	if (pool_strategy == POOL_ROTATE)
-		wlogprint("Set to rotate every %d minutes\n", opt_rotate_period);
-	wlogprint("Pool [A]dd [R]emove [D]isable [E]nable [Q]uota change\n");
-	wlogprint("[C]hange management strategy [S]witch pool [I]nformation\n");
-	wlogprint("Or press any other key to continue\n");
-	logwin_update();
-	input = getch();
-
-	if (!strncasecmp(&input, "a", 1)) {
-		input_pool(true);
-		goto updated;
-	} else if (!strncasecmp(&input, "r", 1)) {
-		if (total_pools <= 1) {
-			wlogprint("Cannot remove last pool");
-			goto retry;
-		}
-		selected = curses_int("Select pool number");
-		if (selected < 0 || selected >= total_pools) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		pool = pools[selected];
-		if (pool == current_pool())
-			switch_pools(NULL);
-		if (pool == current_pool()) {
-			wlogprint("Unable to remove pool due to activity\n");
-			goto retry;
-		}
-		disable_pool(pool);
-		remove_pool(pool);
-		goto updated;
-	} else if (!strncasecmp(&input, "s", 1)) {
-		selected = curses_int("Select pool number");
-		if (selected < 0 || selected >= total_pools) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		pool = pools[selected];
-		enable_pool(pool);
-		switch_pools(pool);
-		goto updated;
-	} else if (!strncasecmp(&input, "d", 1)) {
-		if (enabled_pools <= 1) {
-			wlogprint("Cannot disable last pool");
-			goto retry;
-		}
-		selected = curses_int("Select pool number");
-		if (selected < 0 || selected >= total_pools) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		pool = pools[selected];
-		disable_pool(pool);
-		if (pool == current_pool())
-			switch_pools(NULL);
-		goto updated;
-	} else if (!strncasecmp(&input, "e", 1)) {
-		selected = curses_int("Select pool number");
-		if (selected < 0 || selected >= total_pools) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		pool = pools[selected];
-		enable_pool(pool);
-		if (pool->prio < current_pool()->prio)
-			switch_pools(pool);
-		goto updated;
-	} else if (!strncasecmp(&input, "c", 1)) {
-		for (i = 0; i <= TOP_STRATEGY; i++)
-			wlogprint("%d: %s\n", i, strategies[i].s);
-		selected = curses_int("Select strategy number type");
-		if (selected < 0 || selected > TOP_STRATEGY) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		if (selected == POOL_ROTATE) {
-			opt_rotate_period = curses_int("Select interval in minutes");
-
-			if (opt_rotate_period < 0 || opt_rotate_period > 9999) {
-				opt_rotate_period = 0;
-				wlogprint("Invalid selection\n");
-				goto retry;
-			}
-		}
-		pool_strategy = selected;
-		switch_pools(NULL);
-		goto updated;
-	} else if (!strncasecmp(&input, "i", 1)) {
-		selected = curses_int("Select pool number");
-		if (selected < 0 || selected >= total_pools) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		pool = pools[selected];
-		display_pool_summary(pool);
-		goto retry;
-	} else if (!strncasecmp(&input, "q", 1)) {
-		selected = curses_int("Select pool number");
-		if (selected < 0 || selected >= total_pools) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		pool = pools[selected];
-		selected = curses_int("Set quota");
-		if (selected < 0) {
-			wlogprint("Invalid negative quota\n");
-			goto retry;
-		}
-		pool->quota = selected;
-		adjust_quota_gcd();
-		goto updated;
-	} else
-		clear_logwin();
-
-	immedok(logwin, false);
-	opt_loginput = false;
-}
-
-static void display_options(void)
-{
-	int selected;
-	char input;
-
-	opt_loginput = true;
-	immedok(logwin, true);
-	clear_logwin();
-retry:
-	wlogprint("[N]ormal [C]lear [S]ilent mode (disable all output)\n");
-	wlogprint("[D]ebug:%s\n[P]er-device:%s\n[Q]uiet:%s\n[V]erbose:%s\n"
-		  "[R]PC debug:%s\n[W]orkTime details:%s\nco[M]pact: %s\n"
-		  "[T]oggle status switching:%s\n"
-		  "w[I]descreen:%s\n"
-		  "[Z]ero statistics\n"
-		  "[L]og interval:%d\n",
-		opt_debug ? "on" : "off",
-	        want_per_device_stats? "on" : "off",
-		opt_quiet ? "on" : "off",
-		opt_log_output ? "on" : "off",
-		opt_protocol ? "on" : "off",
-		opt_worktime ? "on" : "off",
-		opt_compact ? "on" : "off",
-		switch_status ? "enabled" : "disabled",
-		opt_widescreen ? "enabled" : "disabled",
-		opt_log_interval);
-	wlogprint("Select an option or any other key to return\n");
-	logwin_update();
-	input = getch();
-	if (!strncasecmp(&input, "q", 1)) {
-		opt_quiet ^= true;
-		wlogprint("Quiet mode %s\n", opt_quiet ? "enabled" : "disabled");
-		goto retry;
-	} else if (!strncasecmp(&input, "v", 1)) {
-		opt_log_output ^= true;
-		if (opt_log_output)
-			opt_quiet = false;
-		wlogprint("Verbose mode %s\n", opt_log_output ? "enabled" : "disabled");
-		goto retry;
-	} else if (!strncasecmp(&input, "n", 1)) {
-		opt_log_output = false;
-		opt_debug = false;
-		opt_quiet = false;
-		opt_protocol = false;
-		opt_compact = false;
-		want_per_device_stats = false;
-		wlogprint("Output mode reset to normal\n");
-		switch_logsize(false);
-		goto retry;
-	} else if (!strncasecmp(&input, "d", 1)) {
-		opt_debug ^= true;
-		opt_log_output = opt_debug;
-		if (opt_debug)
-			opt_quiet = false;
-		wlogprint("Debug mode %s\n", opt_debug ? "enabled" : "disabled");
-		goto retry;
-	} else if (!strncasecmp(&input, "m", 1)) {
-		opt_compact ^= true;
-		wlogprint("Compact mode %s\n", opt_compact ? "enabled" : "disabled");
-		switch_logsize(false);
-		goto retry;
-	} else if (!strncasecmp(&input, "p", 1)) {
-		want_per_device_stats ^= true;
-		opt_log_output = want_per_device_stats;
-		wlogprint("Per-device stats %s\n", want_per_device_stats ? "enabled" : "disabled");
-		goto retry;
-	} else if (!strncasecmp(&input, "r", 1)) {
-		opt_protocol ^= true;
-		if (opt_protocol)
-			opt_quiet = false;
-		wlogprint("RPC protocol debugging %s\n", opt_protocol ? "enabled" : "disabled");
-		goto retry;
-	} else if (!strncasecmp(&input, "c", 1))
-		clear_logwin();
-	else if (!strncasecmp(&input, "l", 1)) {
-		selected = curses_int("Interval in seconds");
-		if (selected < 0 || selected > 9999) {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		opt_log_interval = selected;
-		wlogprint("Log interval set to %d seconds\n", opt_log_interval);
-		goto retry;
-	} else if (!strncasecmp(&input, "s", 1)) {
-		opt_realquiet = true;
-	} else if (!strncasecmp(&input, "w", 1)) {
-		opt_worktime ^= true;
-		wlogprint("WorkTime details %s\n", opt_worktime ? "enabled" : "disabled");
-		goto retry;
-	} else if (!strncasecmp(&input, "t", 1)) {
-		switch_status ^= true;
-		goto retry;
-	} else if (!strncasecmp(&input, "i", 1)) {
-		opt_widescreen ^= true;
-		goto retry;
-	} else if (!strncasecmp(&input, "z", 1)) {
-		zero_stats();
-		goto retry;
-	} else
-		clear_logwin();
-
-	immedok(logwin, false);
-	opt_loginput = false;
-}
-#endif
-
 void default_save_file(char *filename)
 {
 	if (default_config && *default_config) {
@@ -5466,302 +4718,6 @@ void default_save_file(char *filename)
 #endif
 	strcat(filename, def_conf);
 }
-
-#ifdef HAVE_CURSES
-static void set_options(void)
-{
-	char input;
-
-	opt_loginput = true;
-	immedok(logwin, true);
-	clear_logwin();
-retry:
-	wlogprint("[W]rite config file\n[C]gminer restart\n");
-	wlogprint("Select an option or any other key to return\n");
-	logwin_update();
-	input = getch();
-
-	if  (!strncasecmp(&input, "w", 1)) {
-		FILE *fcfg;
-		char *str, filename[PATH_MAX], prompt[PATH_MAX + 50];
-
-		default_save_file(filename);
-		snprintf(prompt, sizeof(prompt), "Config filename to write (Enter for default) [%s]", filename);
-		str = curses_input(prompt);
-		if (strcmp(str, "-1")) {
-			struct stat statbuf;
-
-			strcpy(filename, str);
-			free(str);
-			if (!stat(filename, &statbuf)) {
-				wlogprint("File exists, overwrite?\n");
-				input = getch();
-				if (strncasecmp(&input, "y", 1))
-					goto retry;
-			}
-		}
-		else
-			free(str);
-		fcfg = fopen(filename, "w");
-		if (!fcfg) {
-			wlogprint("Cannot open or create file\n");
-			goto retry;
-		}
-		write_config(fcfg);
-		fclose(fcfg);
-		goto retry;
-
-	} else if (!strncasecmp(&input, "c", 1)) {
-		wlogprint("Are you sure?\n");
-		input = getch();
-		if (!strncasecmp(&input, "y", 1))
-			app_restart();
-		else
-			clear_logwin();
-	} else
-		clear_logwin();
-
-	immedok(logwin, false);
-	opt_loginput = false;
-}
-
-#ifdef USE_USBUTILS
-static void mt_enable(struct thr_info *mythr)
-{
-	cgsem_post(&mythr->sem);
-}
-
-static void set_usb(void)
-{
-	int selected, i, mt, enabled, disabled, zombie, total, blacklisted;
-	struct cgpu_info *cgpu;
-	struct thr_info *thr;
-	double val;
-	char input;
-
-	opt_loginput = true;
-	immedok(logwin, true);
-	clear_logwin();
-
-retry:
-	enabled = 0;
-	disabled = 0;
-	zombie = 0;
-	total = 0;
-	blacklisted = 0;
-
-	rd_lock(&mining_thr_lock);
-	mt = mining_threads;
-	rd_unlock(&mining_thr_lock);
-
-	for (i = 0; i < mt; i++) {
-		cgpu = mining_thr[i]->cgpu;
-		if (unlikely(!cgpu))
-			continue;
-		if (cgpu->usbinfo.nodev)
-			zombie++;
-		else if  (cgpu->deven == DEV_DISABLED)
-			disabled++;
-		else
-			enabled++;
-		if (cgpu->blacklisted)
-			blacklisted++;
-		total++;
-	}
-	wlogprint("Hotplug interval:%d\n", hotplug_time);
-	wlogprint("%d USB devices, %d enabled, %d disabled, %d zombie\n",
-		  total, enabled, disabled, zombie);
-	wlogprint("[S]ummary of device information\n");
-	wlogprint("[E]nable device\n");
-	wlogprint("[D]isable device\n");
-	wlogprint("[U]nplug to allow hotplug restart\n");
-	wlogprint("[R]eset device USB\n");
-	wlogprint("[L]ist all known devices\n");
-	wlogprint("[B]lacklist current device from current instance of cgminer\n");
-	wlogprint("[W]hitelist previously blacklisted device\n");
-	wlogprint("[H]otplug interval (0 to disable)\n");
-	wlogprint("Select an option or any other key to return\n");
-	logwin_update();
-	input = getch();
-
-	if (!strncasecmp(&input, "s", 1)) {
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		wlogprint("Device %03u:%03u\n", cgpu->usbinfo.bus_number, cgpu->usbinfo.device_address);
-		wlogprint("Name %s\n", cgpu->drv->name);
-		wlogprint("ID %d\n", cgpu->device_id);
-		wlogprint("Enabled: %s\n", cgpu->deven != DEV_DISABLED ? "Yes" : "No");
-		wlogprint("Temperature %.1f\n", cgpu->temp);
-		wlogprint("MHS av %.0f\n", cgpu->total_mhashes / cgpu_runtime(cgpu));
-		wlogprint("Accepted %d\n", cgpu->accepted);
-		wlogprint("Rejected %d\n", cgpu->rejected);
-		wlogprint("Hardware Errors %d\n", cgpu->hw_errors);
-		wlogprint("Last Share Pool %d\n", cgpu->last_share_pool_time > 0 ? cgpu->last_share_pool : -1);
-		wlogprint("Total MH %.1f\n", cgpu->total_mhashes);
-		wlogprint("Diff1 Work %"PRId64"\n", cgpu->diff1);
-		wlogprint("Difficulty Accepted %.1f\n", cgpu->diff_accepted);
-		wlogprint("Difficulty Rejected %.1f\n", cgpu->diff_rejected);
-		wlogprint("Last Share Difficulty %.1f\n", cgpu->last_share_diff);
-		wlogprint("No Device: %s\n", cgpu->usbinfo.nodev ? "True" : "False");
-		wlogprint("Last Valid Work %"PRIu64"\n", (uint64_t)cgpu->last_device_valid_work);
-		val = 0;
-		if (cgpu->hw_errors + cgpu->diff1)
-			val = cgpu->hw_errors / (cgpu->hw_errors + cgpu->diff1);
-		wlogprint("Device Hardware %.1f%%\n", val);
-		val = 0;
-		if (cgpu->diff1)
-			val = cgpu->diff_rejected / cgpu->diff1;
-		wlogprint("Device Rejected %.1f%%\n", val);
-		goto retry;
-	} else if (!strncasecmp(&input, "e", 1)) {
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		if (cgpu->usbinfo.nodev) {
-			wlogprint("Device removed, unable to re-enable!\n");
-			goto retry;
-		}
-		thr = get_thread(selected);
-		cgpu->deven = DEV_ENABLED;
-		mt_enable(thr);
-		goto retry;
-	} else if (!strncasecmp(&input, "d", 1)) {
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		cgpu->deven = DEV_DISABLED;
-		goto retry;
-	} else if (!strncasecmp(&input, "u", 1)) {
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		if (cgpu->usbinfo.nodev) {
-			wlogprint("Device already removed, unable to unplug!\n");
-			goto retry;
-		}
-		usb_nodev(cgpu);
-		goto retry;
-	} else if (!strncasecmp(&input, "r", 1)) {
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		if (cgpu->usbinfo.nodev) {
-			wlogprint("Device already removed, unable to reset!\n");
-			goto retry;
-		}
-		usb_reset(cgpu);
-		goto retry;
-	} else if (!strncasecmp(&input, "b", 1)) {
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		if (cgpu->usbinfo.nodev) {
-			wlogprint("Device already removed, unable to blacklist!\n");
-			goto retry;
-		}
-		blacklist_cgpu(cgpu);
-		goto retry;
-	} else if (!strncasecmp(&input, "w", 1)) {
-		if (!blacklisted) {
-			wlogprint("No blacklisted devices!\n");
-			goto retry;
-		}
-		wlogprint("Blacklisted devices:\n");
-		for (i = 0; i < mt; i++) {
-			cgpu = mining_thr[i]->cgpu;
-			if (unlikely(!cgpu))
-				continue;
-			if (cgpu->blacklisted) {
-				wlogprint("%d: %s %d %03u:%03u\n", i, cgpu->drv->name,
-					  cgpu->device_id, cgpu->usbinfo.bus_number,
-					  cgpu->usbinfo.device_address);
-			}
-		}
-		selected = curses_int("Select device number");
-		if (selected < 0 || selected >= mt)  {
-			wlogprint("Invalid selection\n");
-			goto retry;
-		}
-		cgpu = mining_thr[selected]->cgpu;
-		if (!cgpu->blacklisted) {
-			wlogprint("Device not blacklisted, unable to whitelist\n");
-			goto retry;
-		}
-		whitelist_cgpu(cgpu);
-		goto retry;
-	} else if (!strncasecmp(&input, "h", 1)) {
-		selected = curses_int("Select hotplug interval in seconds (0 to disable)");
-		if (selected < 0 || selected > 9999)  {
-			wlogprint("Invalid value\n");
-			goto retry;
-		}
-		hotplug_time = selected;
-		goto retry;
-	} else if (!strncasecmp(&input, "l", 1)) {
-		usb_list();
-		goto retry;
-	} else
-		clear_logwin();
-
-	immedok(logwin, false);
-	opt_loginput = false;
-}
-#endif
-
-static void *input_thread(void __maybe_unused *userdata)
-{
-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
-
-	RenameThread("Input");
-
-	if (!curses_active)
-		return NULL;
-
-	while (1) {
-		char input;
-
-		input = getch();
-		if (!strncasecmp(&input, "q", 1)) {
-			kill_work();
-			return NULL;
-		} else if (!strncasecmp(&input, "d", 1))
-			display_options();
-		else if (!strncasecmp(&input, "p", 1))
-			display_pools();
-		else if (!strncasecmp(&input, "s", 1))
-			set_options();
-#ifdef USE_USBUTILS
-		else if (!strncasecmp(&input, "u", 1))
-			set_usb();
-#endif
-		if (opt_realquiet) {
-			disable_curses();
-			break;
-		}
-	}
-
-	return NULL;
-}
-#endif
 
 static void *api_thread(void *userdata)
 {
@@ -8118,38 +7074,6 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 
 		hashmeter(-1, 0);
 
-#ifdef HAVE_CURSES
-		if (curses_active_locked()) {
-			struct cgpu_info *cgpu;
-			int count;
-
-			change_logwinsize();
-			curses_print_status();
-			count = 0;
-			for (i = 0; i < total_devices; i++) {
-				cgpu = get_devices(i);
-#ifndef USE_USBUTILS
-				if (cgpu)
-#else
-				if (cgpu && !cgpu->usbinfo.nodev)
-#endif
-					curses_print_devstatus(cgpu, i, count++);
-			}
-#ifdef USE_USBUTILS
-			for (i = 0; i < total_devices; i++) {
-				cgpu = get_devices(i);
-				if (cgpu && cgpu->usbinfo.nodev)
-					curses_print_devstatus(cgpu, i, count++);
-			}
-#endif
-			touchwin(statuswin);
-			wrefresh(statuswin);
-			touchwin(logwin);
-			wrefresh(logwin);
-			unlock_curses();
-		}
-#endif
-
 		cgtime(&now);
 
 #if USE_LIBSYSTEMD
@@ -8360,9 +7284,6 @@ static void clean_up(bool restarting)
 #ifdef WIN32
 	timeEndPeriod(1);
 #endif
-#ifdef HAVE_CURSES
-	disable_curses();
-#endif
 	if (!restarting && !opt_realquiet && successful_connect)
 		print_summary();
 
@@ -8394,10 +7315,6 @@ void __quit(int status, bool clean)
 
 	if (clean)
 		clean_up(false);
-#ifdef HAVE_CURSES
-	else
-		disable_curses();
-#endif
 
 #if defined(unix) || defined(__APPLE__)
 	if (forkpid > 0) {
@@ -8414,24 +7331,6 @@ void _quit(int status)
 {
 	__quit(status, true);
 }
-
-#ifdef HAVE_CURSES
-char *curses_input(const char *query)
-{
-	char *input;
-
-	echo();
-	input = cgmalloc(255);
-	leaveok(logwin, false);
-	wlogprint("%s:\n", query);
-	wgetnstr(logwin, input, 255);
-	if (!strlen(input))
-		strcpy(input, "-1");
-	leaveok(logwin, true);
-	noecho();
-	return input;
-}
-#endif
 
 static bool pools_active = false;
 
@@ -8502,61 +7401,6 @@ bool add_pool_details(struct pool *pool, bool live, char *url, char *user, char 
 	return true;
 }
 
-#ifdef HAVE_CURSES
-static bool input_pool(bool live)
-{
-	char *url, *user, *pass;
-	struct pool *pool;
-	bool ret = false;
-
-	immedok(logwin, true);
-	wlogprint("Input server details.\n");
-
-retry:
-	url = NULL;
-	user = NULL;
-	pass = NULL;
-	url = curses_input("URL");
-	if (!strcmp(url, "-1")) {
-		wlogprint("Invalid input\n");
-		goto out;
-	}
-
-	user = curses_input("Username");
-	if (!strcmp(user, "-1")) {
-		wlogprint("Invalid input\n");
-		goto out;
-	}
-
-	pass = curses_input("Password [enter for none]");
-	if (!strcmp(pass, "-1")) {
-		free(pass);
-		pass = strdup("");
-	}
-
-	pool = add_pool();
-	url = setup_url(pool, url);
-	ret = add_pool_details(pool, live, url, user, pass);
-	if (!ret) {
-		remove_pool(pool);
-		wlogprint("URL %s failed alive testing, reinput details\n", url);
-		free(url);
-		free(user);
-		free(pass);
-		goto retry;
-	}
-out:
-	immedok(logwin, false);
-
-	if (!ret) {
-		free(url);
-		free(user);
-		free(pass);
-	}
-	return ret;
-}
-#endif
-
 #if defined(unix) || defined(__APPLE__)
 static void fork_monitor()
 {
@@ -8625,36 +7469,6 @@ static void fork_monitor()
 	}
 }
 #endif // defined(unix)
-
-#ifdef HAVE_CURSES
-static void enable_curses_windows(void)
-{
-	int x,y;
-
-	getmaxyx(mainwin, y, x);
-	statuswin = newwin(logstart, x, 0, 0);
-	leaveok(statuswin, true);
-	logwin = newwin(y - logcursor, 0, logcursor, 0);
-	idlok(logwin, true);
-	scrollok(logwin, true);
-	leaveok(logwin, true);
-	cbreak();
-	noecho();
-}
-void enable_curses(void) {
-	lock_curses();
-	if (curses_active) {
-		unlock_curses();
-		return;
-	}
-
-	mainwin = initscr();
-	enable_curses_windows();
-	curses_active = true;
-	statusy = logstart;
-	unlock_curses();
-}
-#endif
 
 static int cgminer_id_count = 0;
 
@@ -8951,9 +7765,6 @@ static void hotplug_process(void)
 	wr_unlock(&mining_thr_lock);
 
 	adjust_mostdevs();
-#ifdef HAVE_CURSES
-	switch_logsize(true);
-#endif
 }
 
 #define DRIVER_DRV_DETECT_HOTPLUG(X) X##_drv.drv_detect(true);
@@ -9318,14 +8129,6 @@ ASSERTbc(sizeof(test_work.hash) == (BC_MAX_BITS / HEX_BYTE));
 	}
 #endif
 
-#ifdef HAVE_CURSES
-	if (opt_realquiet || opt_display_devs || opt_decode)
-		use_curses = false;
-
-	if (use_curses)
-		enable_curses();
-#endif
-
 	applog(LOG_WARNING, "Started %s", packagename);
 	if (cnfbuf) {
 		applog(LOG_NOTICE, "Loaded configuration file %s", cnfbuf);
@@ -9380,10 +8183,7 @@ ASSERTbc(sizeof(test_work.hash) == (BC_MAX_BITS / HEX_BYTE));
 
 	if (!total_pools) {
 		applog(LOG_WARNING, "Need to specify at least one pool server.");
-#ifdef HAVE_CURSES
-		if (!use_curses || !input_pool(false))
-#endif
-			early_quit(1, "Pool setup failed");
+		early_quit(1, "Pool setup failed");
 	}
 
 	for (i = 0; i < total_pools; i++) {
@@ -9451,14 +8251,6 @@ ASSERTbc(sizeof(test_work.hash) == (BC_MAX_BITS / HEX_BYTE));
 		}
 		if (!use_curses)
 			early_quit(0, "No servers could be used! Exiting.");
-#ifdef HAVE_CURSES
-		touchwin(logwin);
-		wrefresh(logwin);
-		halfdelay(10);
-		if (getch() != ERR)
-			early_quit(0, "No servers could be used! Exiting.");
-		cbreak();
-#endif
 	};
 
 begin_bench:
@@ -9508,9 +8300,6 @@ begin_bench:
 	if (!opt_compact) {
 		logstart += most_devices;
 		logcursor = logstart + 1;
-#ifdef HAVE_CURSES
-		check_winsizes();
-#endif
 	}
 
 	// Start threads
@@ -9586,17 +8375,6 @@ begin_bench:
 	thr = &control_thr[hotplug_thr_id];
 	if (thr_info_create(thr, NULL, hotplug_thread, thr))
 		early_quit(1, "hotplug thread create failed");
-	pthread_detach(thr->pth);
-#endif
-
-#ifdef HAVE_CURSES
-	/* Create curses input thread for keyboard input. Create this last so
-	 * that we know all threads are created since this can call kill_work
-	 * to try and shut down all previous threads. */
-	input_thr_id = 7;
-	thr = &control_thr[input_thr_id];
-	if (thr_info_create(thr, NULL, input_thread, thr))
-		early_quit(1, "input thread create failed");
 	pthread_detach(thr->pth);
 #endif
 
